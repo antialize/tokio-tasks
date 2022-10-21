@@ -5,7 +5,7 @@ edition = "2021"
 authors = ["Jakob Truelsen <jakob@scalgo.com>"]
 description = "Task managment for tokio"
 documentation = "https://docs.rs/tokio-tasks"
-keywords = ["task managment"]
+keywords = ["taskmanagment"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/antialize/tokio-tasks"
 
