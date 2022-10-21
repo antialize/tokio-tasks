@@ -278,10 +278,12 @@ impl RunToken {
         }
     }
 
+    /// Store a file line location in the run_token
     pub fn set_location(&self, file: &'static str, line: u32) {
         self.0.content.lock().unwrap().location = Some((file, line));
     }
 
+    // Retrive the stored file,live location in the run_token
     pub fn location(&self) -> Option<(&'static str, u32)> {
         self.0.content.lock().unwrap().location
     }
@@ -306,6 +308,7 @@ impl core::fmt::Debug for RunToken {
     }
 }
 
+/// Wait until task cancellation is completed
 #[must_use = "futures do nothing unless polled"]
 pub struct WaitForCancellationFuture<'a> {
     token: &'a RunToken,
@@ -357,6 +360,7 @@ impl<'a> Drop for WaitForCancellationFuture<'a> {
 
 unsafe impl<'a> Send for WaitForCancellationFuture<'a> {}
 
+/// Wait until task is not paused
 #[cfg(feature = "pause")]
 #[must_use = "futures do nothing unless polled"]
 pub struct WaitForPauseFuture<'a> {

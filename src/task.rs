@@ -30,21 +30,19 @@ lazy_static! {
 static TASK_ID_COUNT: AtomicUsize = AtomicUsize::new(0);
 static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 
-/// Error returned by `wc` when c was canceled before the future returned
+/// Error returned by [cancelable] when c was canceled before the future returned
 #[derive(Debug)]
 pub struct CancelledError {}
-
 impl Display for CancelledError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "CancelledError")
     }
 }
-
 impl std::error::Error for CancelledError {}
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
-/// Return result from fut, unless c is canceled before fut is done
+/// Return result from fut, unless run_token is canceled before fut is done
 pub async fn cancelable<T, F: Future<Output = T>>(
     run_token: &RunToken,
     fut: F,
@@ -58,7 +56,7 @@ pub async fn cancelable<T, F: Future<Output = T>>(
     }
 }
 
-/// Return result from fut, unless c is canceled before fut is done
+/// Return result from fut, unless run_token is canceled before fut is done
 #[cfg(feature = "ordered-locks")]
 pub async fn cancelable_checked<T, F: Future<Output = T>>(
     run_token: &RunToken,
@@ -74,6 +72,7 @@ pub async fn cancelable_checked<T, F: Future<Output = T>>(
     }
 }
 
+#[doc(hidden)]
 #[derive(Debug)]
 pub enum FinishState<'a> {
     Success,
@@ -94,6 +93,7 @@ pub struct TaskBuilder {
 }
 
 impl TaskBuilder {
+    /// Stract the construction of a new task with the given name
     pub fn new(name: impl Into<Cow<'static, str>>) -> Self {
         Self {
             id: TASK_ID_COUNT.fetch_add(1, Ordering::SeqCst),
@@ -106,11 +106,13 @@ impl TaskBuilder {
         }
     }
 
-    // Unique id of the task we are creating
+    /// Unique id of the task we are creating
     pub fn id(&self) -> usize {
         self.id
     }
 
+    /// Set the run_token for the task. It is sometimes nessesary to
+    /// know the run_token of a task before it is created
     pub fn set_run_token(self, run_token: RunToken) -> Self {
         Self { run_token, ..self }
     }
@@ -162,7 +164,7 @@ impl TaskBuilder {
         let join_handle = tokio::spawn(async move {
             let g = scope_guard(|| {
                 if let Some(t) = TASKS.lock().unwrap().remove(&id) {
-                    t.handle_finished(FinishState::Drop);
+                    t._internal_handle_finished(FinishState::Drop);
                 }
             });
             let r = fut.await;
@@ -172,7 +174,7 @@ impl TaskBuilder {
             };
             g.release();
             if let Some(t) = TASKS.lock().unwrap().remove(&id) {
-                t.handle_finished(s);
+                t._internal_handle_finished(s);
             }
             r
         });
@@ -194,6 +196,7 @@ impl TaskBuilder {
         task
     }
 
+    /// Create the new task also giving it a clean lock token
     #[cfg(feature = "ordered-locks")]
     pub fn create_with_lock_token<
         T: 'static + Send + Sync,
@@ -208,19 +211,31 @@ impl TaskBuilder {
     }
 }
 
+/// Base trait for all tasks, that is independent of the return type
 pub trait TaskBase: Send + Sync {
-    fn handle_finished(&self, state: FinishState);
+    #[doc(hidden)]
+    fn _internal_handle_finished(&self, state: FinishState);
+    /// Return the shutdown order of this task as defined by the [TaskBuilder]
     fn shutdown_order(&self) -> i32;
+    /// Return the name of this task as defined by the [TaskBuilder]
     fn name(&self) -> &str;
+    /// Return the unique id of this task
     fn id(&self) -> usize;
+    /// If true the application will shut down with an error if this task returns
     fn main(&self) -> bool;
+    /// If this is true the task will be cancled by dropping the future instead of signaling the run token
     fn abort(&self) -> bool;
+    /// If true the application will shut down with an error if this task returns with an error
     fn critical(&self) -> bool;
+    /// Unixtimestamp of when the task started
     fn start_time(&self) -> f64;
+    /// Cantle the task, return futer that returns when the task is done
     fn cancel(self: Arc<Self>) -> BoxFuture<'static, ()>;
+    /// Get the run token associated with the task
     fn run_token(&self) -> &RunToken;
 }
 
+/// A possible running task, with a return value of `Result<T, E>`
 pub struct Task<T: Send + Sync, E: Sync + Sync> {
     id: usize,
     name: Cow<'static, str>,
@@ -246,7 +261,7 @@ impl<T: Send + Sync + 'static, E: Send + Sync + 'static> TaskBase for Task<T, E>
         self.id
     }
 
-    fn handle_finished(&self, state: FinishState) {
+    fn _internal_handle_finished(&self, state: FinishState) {
         match state {
             FinishState::Success => {
                 if !self.main
@@ -329,10 +344,14 @@ impl<T: Send + Sync + 'static, E: Send + Sync + 'static> TaskBase for Task<T, E>
     }
 }
 
+/// Error return while waiting for a task
 #[derive(Debug)]
 pub enum WaitError<E: Send + Sync> {
+    /// The task has allready been sucessfully awaited
     HandleUnset(String),
+    /// A join error happened while waiting for the task
     JoinError(tokio::task::JoinError),
+    /// The task failed with error E
     TaskFailure(E),
 }
 
@@ -348,45 +367,64 @@ impl<E: std::fmt::Display + Send + Sync> std::fmt::Display for WaitError<E> {
 
 impl<E: std::error::Error + Send + Sync> std::error::Error for WaitError<E> {}
 
+struct TaskJoinHandleBorrow<'a, T: Send + Sync, E: Send + Sync> {
+    task: &'a Arc<Task<T, E>>,
+    jh: Option<JoinHandle<Result<T, E>>>,
+}
+
+impl<'a, T: Send + Sync, E: Send + Sync> TaskJoinHandleBorrow<'a, T, E> {
+    fn new(task: &'a Arc<Task<T, E>>) -> Self {
+        let jh = task.join_handle.lock().unwrap().take();
+        Self { task, jh }
+    }
+}
+
+impl<'a, T: Send + Sync, E: Send + Sync> Drop for TaskJoinHandleBorrow<'a, T, E> {
+    fn drop(&mut self) {
+        *self.task.join_handle.lock().unwrap() = self.jh.take();
+    }
+}
+
 impl<T: Send + Sync, E: Send + Sync> Task<T, E> {
     /// Cancel the task, either by setting the cancel_token or by aborting it.
     /// Wait for it to finish
+    /// Note that this function fill fail t
     pub async fn cancel(self: Arc<Self>) {
-        let jh = std::mem::take(std::ops::DerefMut::deref_mut(
-            &mut self.join_handle.lock().unwrap(),
-        ));
+        let mut b = TaskJoinHandleBorrow::new(&self);
         self.run_token.cancel();
-        if let Some(jh) = jh {
+        if let Some(jh) = &mut b.jh {
             if self.abort {
                 jh.abort();
             }
             if let Err(e) = jh.await {
                 info!("Unable to join task {:?}", e);
                 if let Some(t) = TASKS.lock().unwrap().remove(&self.id) {
-                    t.handle_finished(FinishState::JoinError(e));
+                    t._internal_handle_finished(FinishState::JoinError(e));
                 }
             }
         }
         if !SHUTTING_DOWN.load(Ordering::SeqCst) {
             info!("  canceled {} ({})", self.name, self.id);
         }
+        std::mem::forget(b);
     }
 
+    /// Wait for the task to finish.
     pub async fn wait(self: Arc<Self>) -> Result<T, WaitError<E>> {
-        let jh = std::mem::take(std::ops::DerefMut::deref_mut(
-            &mut self.join_handle.lock().unwrap(),
-        ));
-        match jh {
+        let mut b = TaskJoinHandleBorrow::new(&self);
+        let r = match &mut b.jh {
             None => Err(WaitError::HandleUnset(self.name.to_string())),
             Some(jh) => match jh.await {
                 Ok(Ok(v)) => Ok(v),
                 Ok(Err(e)) => Err(WaitError::TaskFailure(e)),
                 Err(e) => Err(WaitError::JoinError(e)),
             },
-        }
+        };
+        std::mem::forget(b);
+        r
     }
 }
-pub struct WaitTasks<'a, Sleep, Fut>(Sleep, &'a mut Vec<(String, usize, Fut)>);
+struct WaitTasks<'a, Sleep, Fut>(Sleep, &'a mut Vec<(String, usize, Fut)>);
 impl<'a, Sleep: Unpin, Fut: Unpin> Unpin for WaitTasks<'a, Sleep, Fut> {}
 impl<'a, Sleep: Future + Unpin, Fut: Future + Unpin> Future for WaitTasks<'a, Sleep, Fut> {
     type Output = bool;
@@ -395,15 +433,9 @@ impl<'a, Sleep: Future + Unpin, Fut: Future + Unpin> Future for WaitTasks<'a, Sl
         if self.0.poll_unpin(cx).is_ready() {
             return Poll::Ready(false);
         }
-        //TODO we should use drain_filter here, once in is stabilized
-        let mut idx = 0;
-        while let Some((_, _, f)) = self.1.get_mut(idx) {
-            if matches!(f.poll_unpin(cx), Poll::Ready(_)) {
-                self.1.swap_remove(idx);
-            } else {
-                idx += 1;
-            }
-        }
+
+        self.1
+            .retain_mut(|(_, _, f)| !matches!(f.poll_unpin(cx), Poll::Ready(_)));
 
         if self.1.is_empty() {
             Poll::Ready(true)
