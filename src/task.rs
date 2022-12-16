@@ -504,3 +504,24 @@ pub fn shutdown(message: String) -> bool {
 pub async fn run_tasks() {
     SHUTDOWN_NOTIFY.notified().await
 }
+
+/// Return a list of all currently running tasks
+pub fn list_tasks() -> Vec<Arc<dyn TaskBase>> {
+    TASKS.lock().unwrap().values().cloned().collect()
+}
+
+/// Try to return a list of all currently running tasks,
+/// if we cannot acquire the lock for the tasks before duration has passed return None
+pub fn try_list_tasks_for(duration: std::time::Duration) -> Option<Vec<Arc<dyn TaskBase>>> {
+    let tries = 50;
+    for _ in 0..tries {
+        if let Ok(tasks) = TASKS.try_lock() {
+            return Some(tasks.values().cloned().collect());
+        }
+        std::thread::sleep(duration / tries);
+    }
+    if let Ok(tasks) = TASKS.try_lock() {
+        return Some(tasks.values().cloned().collect());
+    }
+    None
+}
