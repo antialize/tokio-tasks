@@ -479,7 +479,14 @@ pub fn shutdown(message: String) -> bool {
             );
             let mut stop_futures: Vec<(String, usize, _, RunToken)> = shutdown_tasks
                 .iter()
-                .map(|t| (t.name().to_string(), t.id(), t.clone().cancel(), t.run_token().clone()))
+                .map(|t| {
+                    (
+                        t.name().to_string(),
+                        t.id(),
+                        t.clone().cancel(),
+                        t.run_token().clone(),
+                    )
+                })
                 .collect();
             while !WaitTasks(
                 Box::pin(tokio::time::sleep(tokio::time::Duration::from_secs(30))),
