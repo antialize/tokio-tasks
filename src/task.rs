@@ -424,7 +424,7 @@ impl<T: Send + Sync, E: Send + Sync> Task<T, E> {
         r
     }
 }
-struct WaitTasks<'a, Sleep, Fut>(Sleep, &'a mut Vec<(String, usize, Fut)>);
+struct WaitTasks<'a, Sleep, Fut>(Sleep, &'a mut Vec<(String, usize, Fut, RunToken)>);
 impl<'a, Sleep: Unpin, Fut: Unpin> Unpin for WaitTasks<'a, Sleep, Fut> {}
 impl<'a, Sleep: Future + Unpin, Fut: Future + Unpin> Future for WaitTasks<'a, Sleep, Fut> {
     type Output = bool;
@@ -435,7 +435,7 @@ impl<'a, Sleep: Future + Unpin, Fut: Future + Unpin> Future for WaitTasks<'a, Sl
         }
 
         self.1
-            .retain_mut(|(_, _, f)| !matches!(f.poll_unpin(cx), Poll::Ready(_)));
+            .retain_mut(|(_, _, f, _)| !matches!(f.poll_unpin(cx), Poll::Ready(_)));
 
         if self.1.is_empty() {
             Poll::Ready(true)
@@ -477,9 +477,9 @@ pub fn shutdown(message: String) -> bool {
                 shutdown_tasks.len(),
                 shutdown_tasks[0].shutdown_order()
             );
-            let mut stop_futures: Vec<(String, usize, _)> = shutdown_tasks
+            let mut stop_futures: Vec<(String, usize, _, RunToken)> = shutdown_tasks
                 .iter()
-                .map(|t| (t.name().to_string(), t.id(), t.clone().cancel()))
+                .map(|t| (t.name().to_string(), t.id(), t.clone().cancel(), t.run_token().clone()))
                 .collect();
             while !WaitTasks(
                 Box::pin(tokio::time::sleep(tokio::time::Duration::from_secs(30))),
@@ -488,8 +488,12 @@ pub fn shutdown(message: String) -> bool {
             .await
             {
                 info!("still waiting for {} tasks", stop_futures.len(),);
-                for (name, id, _) in &stop_futures {
-                    info!("  {} ({})", name, id);
+                for (name, id, _, rt) in &stop_futures {
+                    if let Some((file, line)) = rt.location() {
+                        info!("  {} ({}) at {}:{}", name, id, file, line);
+                    } else {
+                        info!("  {} ({})", name, id);
+                    }
                 }
             }
             shutdown_tasks.clear();
