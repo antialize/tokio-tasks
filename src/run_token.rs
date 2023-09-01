@@ -7,8 +7,14 @@ use std::{
     task::{Context, Poll, Waker},
 };
 
+#[cfg(feature = "runtoken-id")]
+use std::sync::atomic::AtomicU64;
+
 #[cfg(feature = "ordered-locks")]
 use ordered_locks::{LockToken, L0};
+
+#[cfg(feature = "runtoken-id")]
+static IDC: AtomicU64 = AtomicU64::new(0);
 
 pub struct IntrusiveList<T> {
     first: *mut ListNode<T>,
@@ -142,6 +148,8 @@ impl Content {
 struct Inner {
     cond: std::sync::Condvar,
     content: std::sync::Mutex<Content>,
+    #[cfg(feature = "runtoken-id")]
+    id: u64,
 }
 
 /// Similar to a [`tokio_util::sync::CancellationToken`],
@@ -163,6 +171,8 @@ impl RunToken {
                 run_wakers: Default::default(),
                 location: None,
             }),
+            #[cfg(feature = "runtoken-id")]
+            id: IDC.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
         }))
     }
 
@@ -176,6 +186,8 @@ impl RunToken {
                 run_wakers: Default::default(),
                 location: None,
             }),
+            #[cfg(feature = "runtoken-id")]
+            id: IDC.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
         }))
     }
 
@@ -286,6 +298,11 @@ impl RunToken {
     // Retrive the stored file,live location in the run_token
     pub fn location(&self) -> Option<(&'static str, u32)> {
         self.0.content.lock().unwrap().location
+    }
+
+    #[cfg(feature = "runtoken-id")]
+    pub fn id(&self) -> u64 {
+        self.0.id
     }
 }
 
