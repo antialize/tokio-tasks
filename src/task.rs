@@ -77,6 +77,7 @@ pub async fn cancelable_checked<T, F: Future<Output = T>>(
 pub enum FinishState<'a> {
     Success,
     Drop,
+    Abort,
     JoinError(JoinError),
     Failure(&'a (dyn std::fmt::Debug + Sync + Send)),
 }
@@ -316,6 +317,16 @@ impl<T: Send + Sync + 'static, E: Send + Sync + 'static> TaskBase for Task<T, E>
                     );
                 }
             }
+            FinishState::Abort => {
+                if !self.main
+                || !shutdown(format!(
+                    "Main task {} ({}) aborted unexpected",
+                    self.name, self.id
+                ))
+                {
+                    debug!("Aborted task {} ({})", self.name, self.id);
+                }
+            }
         }
     }
 
@@ -395,8 +406,10 @@ impl<T: Send + Sync, E: Send + Sync> Task<T, E> {
         if let Some(jh) = &mut b.jh {
             if self.abort {
                 jh.abort();
-            }
-            if let Err(e) = jh.await {
+                if let Some(t) = TASKS.lock().unwrap().remove(&self.id) {
+                    t._internal_handle_finished(FinishState::Abort);
+                }
+            } else if let Err(e) = jh.await {
                 info!("Unable to join task {:?}", e);
                 if let Some(t) = TASKS.lock().unwrap().remove(&self.id) {
                     t._internal_handle_finished(FinishState::JoinError(e));
