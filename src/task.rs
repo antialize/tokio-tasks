@@ -90,6 +90,7 @@ pub struct TaskBuilder {
     critical: bool,
     main: bool,
     abort: bool,
+    no_shutdown: bool,
     shutdown_order: i32,
 }
 
@@ -103,6 +104,7 @@ impl TaskBuilder {
             critical: false,
             main: false,
             abort: false,
+            no_shutdown: false,
             shutdown_order: 0,
         }
     }
@@ -135,6 +137,14 @@ impl TaskBuilder {
     pub fn abort(self) -> Self {
         Self {
             abort: true,
+            ..self
+        }
+    }
+
+    /// Keep the task running on shutdown
+    pub fn no_shutdown(self) -> Self {
+        Self {
+            no_shutdown: true,
             ..self
         }
     }
@@ -185,6 +195,7 @@ impl TaskBuilder {
             critical: self.critical,
             main: self.main,
             abort: self.abort,
+            no_shutdown: self.no_shutdown,
             shutdown_order: self.shutdown_order,
             run_token: self.run_token,
             start_time: std::time::SystemTime::now()
@@ -234,7 +245,9 @@ pub trait TaskBase: Send + Sync {
     fn cancel(self: Arc<Self>) -> BoxFuture<'static, ()>;
     /// Get the run token associated with the task
     fn run_token(&self) -> &RunToken;
-}
+    /// Do not stop task on shutdown
+    fn no_shutdown(&self) -> bool;
+ }
 
 /// A possible running task, with a return value of `Result<T, E>`
 pub struct Task<T: Send + Sync, E: Sync + Sync> {
@@ -243,6 +256,7 @@ pub struct Task<T: Send + Sync, E: Sync + Sync> {
     critical: bool,
     main: bool,
     abort: bool,
+    no_shutdown: bool,
     shutdown_order: i32,
     run_token: RunToken,
     start_time: f64,
@@ -352,6 +366,10 @@ impl<T: Send + Sync + 'static, E: Send + Sync + 'static> TaskBase for Task<T, E>
 
     fn run_token(&self) -> &RunToken {
         &self.run_token
+    }
+
+    fn no_shutdown(&self) -> bool {
+        self.no_shutdown
     }
 }
 
@@ -472,6 +490,7 @@ pub fn shutdown(message: String) -> bool {
         let mut shutdown_tasks: Vec<Arc<dyn TaskBase>> = Vec::new();
         loop {
             for (_, task) in TASKS.lock().unwrap().iter() {
+                if task.no_shutdown() { continue; }
                 if let Some(t) = shutdown_tasks.get(0) {
                     if t.shutdown_order() < task.shutdown_order() {
                         continue;
