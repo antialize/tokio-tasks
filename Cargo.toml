@@ -14,8 +14,8 @@ pause = []
 runtoken-id = []
 
 [dependencies]
-futures-util = "0.3.25"
-tokio = { version = "1.12.0", default_features=false, features = ["sync", "time", "rt"] }
-ordered-locks = { version = "0.2.1", optional=true }
+futures-util = "0.3"
+tokio = { version = "1", default_features=false, features = ["sync", "time", "rt"] }
+ordered-locks = { version = "0.2", optional=true }
 lazy_static = "1.4.0"
-log = "0.4.17"
+log = "0.4"
