@@ -247,7 +247,7 @@ pub trait TaskBase: Send + Sync {
     fn run_token(&self) -> &RunToken;
     /// Do not stop task on shutdown
     fn no_shutdown(&self) -> bool;
- }
+}
 
 /// A possible running task, with a return value of `Result<T, E>`
 pub struct Task<T: Send + Sync, E: Sync + Sync> {
@@ -333,10 +333,10 @@ impl<T: Send + Sync + 'static, E: Send + Sync + 'static> TaskBase for Task<T, E>
             }
             FinishState::Abort => {
                 if !self.main
-                || !shutdown(format!(
-                    "Main task {} ({}) aborted unexpected",
-                    self.name, self.id
-                ))
+                    || !shutdown(format!(
+                        "Main task {} ({}) aborted unexpected",
+                        self.name, self.id
+                    ))
                 {
                     debug!("Aborted task {} ({})", self.name, self.id);
                 }
@@ -424,6 +424,7 @@ impl<T: Send + Sync, E: Send + Sync> Task<T, E> {
         if let Some(jh) = &mut b.jh {
             if self.abort {
                 jh.abort();
+                let _ = jh.await;
                 if let Some(t) = TASKS.lock().unwrap().remove(&self.id) {
                     t._internal_handle_finished(FinishState::Abort);
                 }
@@ -490,8 +491,10 @@ pub fn shutdown(message: String) -> bool {
         let mut shutdown_tasks: Vec<Arc<dyn TaskBase>> = Vec::new();
         loop {
             for (_, task) in TASKS.lock().unwrap().iter() {
-                if task.no_shutdown() { continue; }
-                if let Some(t) = shutdown_tasks.get(0) {
+                if task.no_shutdown() {
+                    continue;
+                }
+                if let Some(t) = shutdown_tasks.first() {
                     if t.shutdown_order() < task.shutdown_order() {
                         continue;
                     }
