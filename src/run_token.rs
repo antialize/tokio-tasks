@@ -47,7 +47,7 @@ impl<T> IntrusiveList<T> {
     unsafe fn remove(&mut self, node: *mut ListNode<T>) -> T {
         assert!(!(*node).next.is_null());
         let v = (*node).data.as_mut_ptr().read();
-        if (*node).next == (*node).prev {
+        if (*node).next == node {
             self.first = std::ptr::null_mut();
         } else {
             if self.first == node {
