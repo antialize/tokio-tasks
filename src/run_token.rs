@@ -11,7 +11,7 @@ use std::{
 use std::sync::atomic::AtomicU64;
 
 #[cfg(feature = "ordered-locks")]
-use ordered_locks::{LockToken, L0};
+use ordered_locks::{L0, LockToken};
 
 #[cfg(feature = "runtoken-id")]
 static IDC: AtomicU64 = AtomicU64::new(0);
@@ -30,57 +30,63 @@ impl<T> Default for IntrusiveList<T> {
 
 impl<T> IntrusiveList<T> {
     unsafe fn push_back(&mut self, node: *mut ListNode<T>, v: T) {
-        assert!((*node).next.is_null());
-        (*node).data.write(v);
-        if self.first.is_null() {
-            (*node).next = node;
-            (*node).prev = node;
-            self.first = node;
-        } else {
-            (*node).prev = (*self.first).prev;
-            (*node).next = self.first;
-            (*(*node).prev).next = node;
-            (*(*node).next).prev = node;
+        unsafe {
+            assert!((*node).next.is_null());
+            (*node).data.write(v);
+            if self.first.is_null() {
+                (*node).next = node;
+                (*node).prev = node;
+                self.first = node;
+            } else {
+                (*node).prev = (*self.first).prev;
+                (*node).next = self.first;
+                (*(*node).prev).next = node;
+                (*(*node).next).prev = node;
+            }
         }
     }
 
     unsafe fn remove(&mut self, node: *mut ListNode<T>) -> T {
-        assert!(!(*node).next.is_null());
-        let v = (*node).data.as_mut_ptr().read();
-        if (*node).next == node {
-            self.first = std::ptr::null_mut();
-        } else {
-            if self.first == node {
-                self.first = (*node).next;
+        unsafe {
+            assert!(!(*node).next.is_null());
+            let v = (*node).data.as_mut_ptr().read();
+            if (*node).next == node {
+                self.first = std::ptr::null_mut();
+            } else {
+                if self.first == node {
+                    self.first = (*node).next;
+                }
+                (*(*node).next).prev = (*node).prev;
+                (*(*node).prev).next = (*node).next;
             }
-            (*(*node).next).prev = (*node).prev;
-            (*(*node).prev).next = (*node).next;
+            (*node).next = std::ptr::null_mut();
+            (*node).prev = std::ptr::null_mut();
+            v
         }
-        (*node).next = std::ptr::null_mut();
-        (*node).prev = std::ptr::null_mut();
-        v
     }
 
     unsafe fn drain(&mut self, v: impl Fn(T)) {
-        if self.first.is_null() {
-            return;
-        }
-        let mut cur = self.first;
-        loop {
-            v((*cur).data.as_mut_ptr().read());
-            let next = (*cur).next;
-            (*cur).next = std::ptr::null_mut();
-            (*cur).prev = std::ptr::null_mut();
-            if next == self.first {
-                break;
+        unsafe {
+            if self.first.is_null() {
+                return;
             }
-            cur = next;
+            let mut cur = self.first;
+            loop {
+                v((*cur).data.as_mut_ptr().read());
+                let next = (*cur).next;
+                (*cur).next = std::ptr::null_mut();
+                (*cur).prev = std::ptr::null_mut();
+                if next == self.first {
+                    break;
+                }
+                cur = next;
+            }
+            self.first = std::ptr::null_mut();
         }
-        self.first = std::ptr::null_mut();
     }
 
     unsafe fn in_list(&self, node: *mut ListNode<T>) -> bool {
-        !(*node).next.is_null()
+        unsafe { !(*node).next.is_null() }
     }
 }
 
@@ -112,15 +118,21 @@ struct Content {
     state: State,
     cancel_wakers: IntrusiveList<Waker>,
     run_wakers: IntrusiveList<Waker>,
+    #[cfg(not(feature = "magic-location"))]
     location: Option<(&'static str, u32)>,
 }
 
 unsafe impl Send for Content {}
 
+#[cfg(feature = "magic-location")]
+const SOME_STR: &'static str = "dummy";
+
 impl Content {
     unsafe fn add_cancle_waker(&mut self, node: *mut ListNode<Waker>, waker: &Waker) {
-        if !self.cancel_wakers.in_list(node) {
-            self.cancel_wakers.push_back(node, waker.clone())
+        unsafe {
+            if !self.cancel_wakers.in_list(node) {
+                self.cancel_wakers.push_back(node, waker.clone())
+            }
         }
     }
 
@@ -132,8 +144,10 @@ impl Content {
     }
 
     unsafe fn remove_cancle_waker(&mut self, node: *mut ListNode<Waker>) {
-        if self.cancel_wakers.in_list(node) {
-            self.cancel_wakers.remove(node);
+        unsafe {
+            if self.cancel_wakers.in_list(node) {
+                self.cancel_wakers.remove(node);
+            }
         }
     }
 

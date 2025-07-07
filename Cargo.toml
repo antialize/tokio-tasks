@@ -1,7 +1,7 @@
 [package]
 name = "tokio-tasks"
 version = "0.2.2"
-edition = "2021"
+edition = "2024"
 authors = ["Jakob Truelsen <jakob@scalgo.com>"]
 description = "Task managment for tokio"
 documentation = "https://docs.rs/tokio-tasks"
@@ -12,10 +12,11 @@ repository = "https://github.com/antialize/tokio-tasks"
 [features]
 pause = []
 runtoken-id = []
+magic-location = []
 
 [dependencies]
 futures-util = "0.3"
-tokio = { version = "1", default_features=false, features = ["sync", "time", "rt"] }
+tokio = { version = "1", default-features=false, features = ["sync", "time", "rt"] }
 ordered-locks = { version = "0.2", optional=true }
 lazy_static = "1.4.0"
 log = "0.4"

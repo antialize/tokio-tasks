@@ -1,15 +1,16 @@
-use crate::{scope_guard::scope_guard, RunToken};
+use crate::{RunToken, scope_guard::scope_guard};
 use futures_util::{
+    Future, FutureExt,
     future::{self},
-    pin_mut, Future, FutureExt,
+    pin_mut,
 };
 use lazy_static::lazy_static;
 use log::{debug, error, info};
 use std::{
     borrow::Cow,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     },
 };
 use std::{collections::HashMap, sync::atomic::AtomicBool};
@@ -21,7 +22,7 @@ use tokio::{
 };
 
 #[cfg(feature = "ordered-locks")]
-use ordered_locks::{CleanLockToken, LockToken, L0};
+use ordered_locks::{CleanLockToken, L0, LockToken};
 
 lazy_static! {
     static ref TASKS: Mutex<HashMap<usize, Arc<dyn TaskBase>>> = Mutex::new(HashMap::new());
@@ -387,9 +388,9 @@ pub enum WaitError<E: Send + Sync> {
 impl<E: std::fmt::Display + Send + Sync> std::fmt::Display for WaitError<E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            WaitError::HandleUnset(v) => write!(f, "Handle unset: {}", v),
-            WaitError::JoinError(v) => write!(f, "Join Error: {}", v),
-            WaitError::TaskFailure(v) => write!(f, "Task Failure: {}", v),
+            WaitError::HandleUnset(v) => write!(f, "Handle unset: {v}"),
+            WaitError::JoinError(v) => write!(f, "Join Error: {v}"),
+            WaitError::TaskFailure(v) => write!(f, "Task Failure: {v}"),
         }
     }
 }
@@ -429,7 +430,7 @@ impl<T: Send + Sync, E: Send + Sync> Task<T, E> {
                     t._internal_handle_finished(FinishState::Abort);
                 }
             } else if let Err(e) = jh.await {
-                info!("Unable to join task {:?}", e);
+                info!("Unable to join task {e:?}");
                 if let Some(t) = TASKS.lock().unwrap().remove(&self.id) {
                     t._internal_handle_finished(FinishState::JoinError(e));
                 }
@@ -486,7 +487,7 @@ pub fn shutdown(message: String) -> bool {
         // Already in the process of shutting down
         return false;
     }
-    info!("Shutting down: {}", message);
+    info!("Shutting down: {message}");
     tokio::spawn(async move {
         let mut shutdown_tasks: Vec<Arc<dyn TaskBase>> = Vec::new();
         loop {
@@ -532,9 +533,9 @@ pub fn shutdown(message: String) -> bool {
                 info!("still waiting for {} tasks", stop_futures.len(),);
                 for (name, id, _, rt) in &stop_futures {
                     if let Some((file, line)) = rt.location() {
-                        info!("  {} ({}) at {}:{}", name, id, file, line);
+                        info!("  {name} ({id}) at {file}:{line}");
                     } else {
-                        info!("  {} ({})", name, id);
+                        info!("  {name} ({id})");
                     }
                 }
             }
