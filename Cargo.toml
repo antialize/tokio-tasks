@@ -1,6 +1,6 @@
 [package]
 name = "tokio-tasks"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2024"
 authors = ["Jakob Truelsen <jakob@scalgo.com>"]
 description = "Task managment for tokio"

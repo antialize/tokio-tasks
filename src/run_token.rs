@@ -310,6 +310,7 @@ impl RunToken {
     }
 
     /// Store a file line location in the run_token
+    #[inline]
     pub fn set_location(&self, file: &'static str, line: u32) {
         #[cfg(feature = "magic-location")]
         {
@@ -353,6 +354,7 @@ impl RunToken {
     }
 
     #[cfg(feature = "runtoken-id")]
+    #[inline]
     pub fn id(&self) -> u64 {
         self.0.id
     }
