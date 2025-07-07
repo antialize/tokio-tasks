@@ -7,7 +7,7 @@ use std::{
     task::{Context, Poll, Waker},
 };
 
-#[cfg(feature = "runtoken-id")]
+#[cfg(any(feature = "runtoken-id", feature = "magic-location"))]
 use std::sync::atomic::AtomicU64;
 
 #[cfg(feature = "ordered-locks")]
@@ -162,6 +162,8 @@ impl Content {
 struct Inner {
     cond: std::sync::Condvar,
     content: std::sync::Mutex<Content>,
+    #[cfg(feature = "magic-location")]
+    location: AtomicU64,
     #[cfg(feature = "runtoken-id")]
     id: u64,
 }
@@ -198,10 +200,13 @@ impl RunToken {
                 state: State::Run,
                 cancel_wakers: Default::default(),
                 run_wakers: Default::default(),
+                #[cfg(not(feature = "magic-location"))]
                 location: None,
             }),
             #[cfg(feature = "runtoken-id")]
             id: IDC.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+            #[cfg(feature = "magic-location")]
+            location: AtomicU64::new(0),
         }))
     }
 
@@ -306,12 +311,45 @@ impl RunToken {
 
     /// Store a file line location in the run_token
     pub fn set_location(&self, file: &'static str, line: u32) {
-        self.0.content.lock().unwrap().location = Some((file, line));
+        #[cfg(feature = "magic-location")]
+        {
+            let p = (file.as_ptr() as u64) ^ (SOME_STR.as_ptr() as u64);
+            assert!(p < 0xFFFFFFFFFF);
+            assert!(file.len() < 0xFF);
+            assert!(line < 0xFFFF);
+            let v = p | ((file.len() as u64) << 56) + ((line as u64) << 40);
+            self.0
+                .location
+                .store(v, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        #[cfg(not(feature = "magic-location"))]
+        {
+            self.0.content.lock().unwrap().location = Some((file, line));
+        }
     }
 
     // Retrive the stored file,live location in the run_token
     pub fn location(&self) -> Option<(&'static str, u32)> {
-        self.0.content.lock().unwrap().location
+        #[cfg(feature = "magic-location")]
+        {
+            let v = self.0.location.load(std::sync::atomic::Ordering::Relaxed);
+            if v == 0 {
+                return None;
+            }
+            let len = ((v & 0xFF00000000000000) >> 56) as usize;
+            let line = ((v & 0x00FFFF0000000000) >> 40) as u32;
+            let p = (v & 0x000000FFFFFFFFFF) ^ (SOME_STR.as_ptr() as u64);
+            let s = unsafe {
+                let p = p as *const u8;
+                std::str::from_utf8_unchecked(std::slice::from_raw_parts(p, len))
+            };
+            Some((s, line))
+        }
+        #[cfg(not(feature = "magic-location"))]
+        {
+            self.0.content.lock().unwrap().location
+        }
     }
 
     #[cfg(feature = "runtoken-id")]
