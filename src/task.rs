@@ -4,7 +4,6 @@ use futures_util::{
     future::{self},
     pin_mut,
 };
-use lazy_static::lazy_static;
 use log::{debug, error, info};
 use std::{
     borrow::Cow,
@@ -24,10 +23,8 @@ use tokio::{
 #[cfg(feature = "ordered-locks")]
 use ordered_locks::{CleanLockToken, L0, LockToken};
 
-lazy_static! {
-    static ref TASKS: Mutex<HashMap<usize, Arc<dyn TaskBase>>> = Mutex::new(HashMap::new());
-    static ref SHUTDOWN_NOTIFY: Notify = Notify::new();
-}
+static TASKS: Mutex<Option<HashMap<usize, Arc<dyn TaskBase>>>> = Mutex::new(None);
+static SHUTDOWN_NOTIFY: Notify = Notify::const_new();
 static TASK_ID_COUNT: AtomicUsize = AtomicUsize::new(0);
 static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 
@@ -175,7 +172,7 @@ impl TaskBuilder {
         debug!("Started task {} ({})", self.name, id);
         let join_handle = tokio::spawn(async move {
             let g = scope_guard(|| {
-                if let Some(t) = TASKS.lock().unwrap().remove(&id) {
+                if let Some(t) = TASKS.lock().unwrap().get_or_insert_default().remove(&id) {
                     t._internal_handle_finished(FinishState::Drop);
                 }
             });
@@ -185,7 +182,7 @@ impl TaskBuilder {
                 Err(e) => FinishState::Failure(e),
             };
             g.release();
-            if let Some(t) = TASKS.lock().unwrap().remove(&id) {
+            if let Some(t) = TASKS.lock().unwrap().get_or_insert_default().remove(&id) {
                 t._internal_handle_finished(s);
             }
             r
@@ -205,7 +202,7 @@ impl TaskBuilder {
                 .as_secs_f64(),
             join_handle: Mutex::new(Some(join_handle)),
         });
-        tasks.insert(self.id, task.clone());
+        tasks.get_or_insert_default().insert(self.id, task.clone());
         task
     }
 
@@ -426,12 +423,22 @@ impl<T: Send + Sync, E: Send + Sync> Task<T, E> {
             if self.abort {
                 jh.abort();
                 let _ = jh.await;
-                if let Some(t) = TASKS.lock().unwrap().remove(&self.id) {
+                if let Some(t) = TASKS
+                    .lock()
+                    .unwrap()
+                    .get_or_insert_default()
+                    .remove(&self.id)
+                {
                     t._internal_handle_finished(FinishState::Abort);
                 }
             } else if let Err(e) = jh.await {
                 info!("Unable to join task {e:?}");
-                if let Some(t) = TASKS.lock().unwrap().remove(&self.id) {
+                if let Some(t) = TASKS
+                    .lock()
+                    .unwrap()
+                    .get_or_insert_default()
+                    .remove(&self.id)
+                {
                     t._internal_handle_finished(FinishState::JoinError(e));
                 }
             }
@@ -491,7 +498,7 @@ pub fn shutdown(message: String) -> bool {
     tokio::spawn(async move {
         let mut shutdown_tasks: Vec<Arc<dyn TaskBase>> = Vec::new();
         loop {
-            for (_, task) in TASKS.lock().unwrap().iter() {
+            for (_, task) in TASKS.lock().unwrap().get_or_insert_default().iter() {
                 if task.no_shutdown() {
                     continue;
                 }
@@ -554,7 +561,13 @@ pub async fn run_tasks() {
 
 /// Return a list of all currently running tasks
 pub fn list_tasks() -> Vec<Arc<dyn TaskBase>> {
-    TASKS.lock().unwrap().values().cloned().collect()
+    TASKS
+        .lock()
+        .unwrap()
+        .get_or_insert_default()
+        .values()
+        .cloned()
+        .collect()
 }
 
 /// Try to return a list of all currently running tasks,
@@ -562,13 +575,13 @@ pub fn list_tasks() -> Vec<Arc<dyn TaskBase>> {
 pub fn try_list_tasks_for(duration: std::time::Duration) -> Option<Vec<Arc<dyn TaskBase>>> {
     let tries = 50;
     for _ in 0..tries {
-        if let Ok(tasks) = TASKS.try_lock() {
-            return Some(tasks.values().cloned().collect());
+        if let Ok(mut tasks) = TASKS.try_lock() {
+            return Some(tasks.get_or_insert_default().values().cloned().collect());
         }
         std::thread::sleep(duration / tries);
     }
-    if let Ok(tasks) = TASKS.try_lock() {
-        return Some(tasks.values().cloned().collect());
+    if let Ok(mut tasks) = TASKS.try_lock() {
+        return Some(tasks.get_or_insert_default().values().cloned().collect());
     }
     None
 }
