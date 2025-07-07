@@ -63,13 +63,6 @@ pub use run_token::RunToken;
 pub use run_token::WaitForCancellationFuture;
 #[cfg(feature = "pause")]
 pub use run_token::WaitForPauseFuture;
-pub use task::cancelable;
-#[cfg(feature = "ordered-locks")]
-pub use task::cancelable_checked;
-pub use task::list_tasks;
-pub use task::run_tasks;
-pub use task::shutdown;
-pub use task::try_list_tasks_for;
 pub use task::BoxFuture;
 pub use task::CancelledError;
 pub use task::FinishState;
@@ -77,3 +70,10 @@ pub use task::Task;
 pub use task::TaskBase;
 pub use task::TaskBuilder;
 pub use task::WaitError;
+pub use task::cancelable;
+#[cfg(feature = "ordered-locks")]
+pub use task::cancelable_checked;
+pub use task::list_tasks;
+pub use task::run_tasks;
+pub use task::shutdown;
+pub use task::try_list_tasks_for;

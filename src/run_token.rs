@@ -7,11 +7,11 @@ use std::{
     task::{Context, Poll, Waker},
 };
 
-#[cfg(feature = "runtoken-id")]
+#[cfg(any(feature = "runtoken-id", feature = "magic-location"))]
 use std::sync::atomic::AtomicU64;
 
 #[cfg(feature = "ordered-locks")]
-use ordered_locks::{LockToken, L0};
+use ordered_locks::{L0, LockToken};
 
 #[cfg(feature = "runtoken-id")]
 static IDC: AtomicU64 = AtomicU64::new(0);
@@ -30,57 +30,63 @@ impl<T> Default for IntrusiveList<T> {
 
 impl<T> IntrusiveList<T> {
     unsafe fn push_back(&mut self, node: *mut ListNode<T>, v: T) {
-        assert!((*node).next.is_null());
-        (*node).data.write(v);
-        if self.first.is_null() {
-            (*node).next = node;
-            (*node).prev = node;
-            self.first = node;
-        } else {
-            (*node).prev = (*self.first).prev;
-            (*node).next = self.first;
-            (*(*node).prev).next = node;
-            (*(*node).next).prev = node;
+        unsafe {
+            assert!((*node).next.is_null());
+            (*node).data.write(v);
+            if self.first.is_null() {
+                (*node).next = node;
+                (*node).prev = node;
+                self.first = node;
+            } else {
+                (*node).prev = (*self.first).prev;
+                (*node).next = self.first;
+                (*(*node).prev).next = node;
+                (*(*node).next).prev = node;
+            }
         }
     }
 
     unsafe fn remove(&mut self, node: *mut ListNode<T>) -> T {
-        assert!(!(*node).next.is_null());
-        let v = (*node).data.as_mut_ptr().read();
-        if (*node).next == node {
-            self.first = std::ptr::null_mut();
-        } else {
-            if self.first == node {
-                self.first = (*node).next;
+        unsafe {
+            assert!(!(*node).next.is_null());
+            let v = (*node).data.as_mut_ptr().read();
+            if (*node).next == node {
+                self.first = std::ptr::null_mut();
+            } else {
+                if self.first == node {
+                    self.first = (*node).next;
+                }
+                (*(*node).next).prev = (*node).prev;
+                (*(*node).prev).next = (*node).next;
             }
-            (*(*node).next).prev = (*node).prev;
-            (*(*node).prev).next = (*node).next;
+            (*node).next = std::ptr::null_mut();
+            (*node).prev = std::ptr::null_mut();
+            v
         }
-        (*node).next = std::ptr::null_mut();
-        (*node).prev = std::ptr::null_mut();
-        v
     }
 
     unsafe fn drain(&mut self, v: impl Fn(T)) {
-        if self.first.is_null() {
-            return;
-        }
-        let mut cur = self.first;
-        loop {
-            v((*cur).data.as_mut_ptr().read());
-            let next = (*cur).next;
-            (*cur).next = std::ptr::null_mut();
-            (*cur).prev = std::ptr::null_mut();
-            if next == self.first {
-                break;
+        unsafe {
+            if self.first.is_null() {
+                return;
             }
-            cur = next;
+            let mut cur = self.first;
+            loop {
+                v((*cur).data.as_mut_ptr().read());
+                let next = (*cur).next;
+                (*cur).next = std::ptr::null_mut();
+                (*cur).prev = std::ptr::null_mut();
+                if next == self.first {
+                    break;
+                }
+                cur = next;
+            }
+            self.first = std::ptr::null_mut();
         }
-        self.first = std::ptr::null_mut();
     }
 
     unsafe fn in_list(&self, node: *mut ListNode<T>) -> bool {
-        !(*node).next.is_null()
+        unsafe { !(*node).next.is_null() }
     }
 }
 
@@ -112,15 +118,21 @@ struct Content {
     state: State,
     cancel_wakers: IntrusiveList<Waker>,
     run_wakers: IntrusiveList<Waker>,
+    #[cfg(not(feature = "magic-location"))]
     location: Option<(&'static str, u32)>,
 }
 
 unsafe impl Send for Content {}
 
+#[cfg(feature = "magic-location")]
+const SOME_STR: &'static str = "dummy";
+
 impl Content {
     unsafe fn add_cancle_waker(&mut self, node: *mut ListNode<Waker>, waker: &Waker) {
-        if !self.cancel_wakers.in_list(node) {
-            self.cancel_wakers.push_back(node, waker.clone())
+        unsafe {
+            if !self.cancel_wakers.in_list(node) {
+                self.cancel_wakers.push_back(node, waker.clone())
+            }
         }
     }
 
@@ -132,8 +144,10 @@ impl Content {
     }
 
     unsafe fn remove_cancle_waker(&mut self, node: *mut ListNode<Waker>) {
-        if self.cancel_wakers.in_list(node) {
-            self.cancel_wakers.remove(node);
+        unsafe {
+            if self.cancel_wakers.in_list(node) {
+                self.cancel_wakers.remove(node);
+            }
         }
     }
 
@@ -148,6 +162,8 @@ impl Content {
 struct Inner {
     cond: std::sync::Condvar,
     content: std::sync::Mutex<Content>,
+    #[cfg(feature = "magic-location")]
+    location: AtomicU64,
     #[cfg(feature = "runtoken-id")]
     id: u64,
 }
@@ -184,10 +200,13 @@ impl RunToken {
                 state: State::Run,
                 cancel_wakers: Default::default(),
                 run_wakers: Default::default(),
+                #[cfg(not(feature = "magic-location"))]
                 location: None,
             }),
             #[cfg(feature = "runtoken-id")]
             id: IDC.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+            #[cfg(feature = "magic-location")]
+            location: AtomicU64::new(0),
         }))
     }
 
@@ -291,16 +310,51 @@ impl RunToken {
     }
 
     /// Store a file line location in the run_token
+    #[inline]
     pub fn set_location(&self, file: &'static str, line: u32) {
-        self.0.content.lock().unwrap().location = Some((file, line));
+        #[cfg(feature = "magic-location")]
+        {
+            let p = (file.as_ptr() as u64) ^ (SOME_STR.as_ptr() as u64);
+            assert!(p < 0xFFFFFFFFFF);
+            assert!(file.len() < 0xFF);
+            assert!(line < 0xFFFF);
+            let v = p | ((file.len() as u64) << 56) + ((line as u64) << 40);
+            self.0
+                .location
+                .store(v, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        #[cfg(not(feature = "magic-location"))]
+        {
+            self.0.content.lock().unwrap().location = Some((file, line));
+        }
     }
 
     // Retrive the stored file,live location in the run_token
     pub fn location(&self) -> Option<(&'static str, u32)> {
-        self.0.content.lock().unwrap().location
+        #[cfg(feature = "magic-location")]
+        {
+            let v = self.0.location.load(std::sync::atomic::Ordering::Relaxed);
+            if v == 0 {
+                return None;
+            }
+            let len = ((v & 0xFF00000000000000) >> 56) as usize;
+            let line = ((v & 0x00FFFF0000000000) >> 40) as u32;
+            let p = (v & 0x000000FFFFFFFFFF) ^ (SOME_STR.as_ptr() as u64);
+            let s = unsafe {
+                let p = p as *const u8;
+                std::str::from_utf8_unchecked(std::slice::from_raw_parts(p, len))
+            };
+            Some((s, line))
+        }
+        #[cfg(not(feature = "magic-location"))]
+        {
+            self.0.content.lock().unwrap().location
+        }
     }
 
     #[cfg(feature = "runtoken-id")]
+    #[inline]
     pub fn id(&self) -> u64 {
         self.0.id
     }
