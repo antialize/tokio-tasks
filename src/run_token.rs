@@ -3,12 +3,11 @@ use futures_util::Future;
 use std::{
     mem::MaybeUninit,
     pin::Pin,
-    sync::Arc,
+    sync::{Arc, atomic::Ordering},
     task::{Context, Poll, Waker},
 };
 
-#[cfg(any(feature = "runtoken-id", feature = "magic-location"))]
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicPtr, AtomicU64};
 
 #[cfg(feature = "ordered-locks")]
 use ordered_locks::{L0, LockToken};
@@ -118,14 +117,9 @@ struct Content {
     state: State,
     cancel_wakers: IntrusiveList<Waker>,
     run_wakers: IntrusiveList<Waker>,
-    #[cfg(not(feature = "magic-location"))]
-    location: Option<(&'static str, u32)>,
 }
 
 unsafe impl Send for Content {}
-
-#[cfg(feature = "magic-location")]
-const SOME_STR: &'static str = "dummy";
 
 impl Content {
     unsafe fn add_cancle_waker(&mut self, node: *mut ListNode<Waker>, waker: &Waker) {
@@ -162,12 +156,61 @@ impl Content {
 struct Inner {
     cond: std::sync::Condvar,
     content: std::sync::Mutex<Content>,
-    #[cfg(feature = "magic-location")]
-    location: AtomicU64,
     #[cfg(feature = "runtoken-id")]
     id: u64,
+    location_file: AtomicPtr<u8>,
+    location_line: AtomicU64,
 }
 
+// This hash function is coped from
+// https://docs.rs/rustc-hash/2.1.1/src/rustc_hash/lib.rs.html#121
+#[inline]
+fn multiply_mix(x: u64, y: u64) -> u64 {
+    let full = (x as u128) * (y as u128);
+    let lo = full as u64;
+    let hi = (full >> 64) as u64;
+    lo ^ hi
+}
+
+fn fxhash(bytes: &[u8]) -> u64 {
+    let len = bytes.len();
+    let mut s0 = 0x243f6a8885a308d3;
+    let mut s1 = 0x13198a2e03707344;
+    if len <= 16 {
+        // XOR the input into s0, s1.
+        if len >= 8 {
+            s0 ^= u64::from_le_bytes(bytes[0..8].try_into().unwrap());
+            s1 ^= u64::from_le_bytes(bytes[len - 8..].try_into().unwrap());
+        } else if len >= 4 {
+            s0 ^= u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as u64;
+            s1 ^= u32::from_le_bytes(bytes[len - 4..].try_into().unwrap()) as u64;
+        } else if len > 0 {
+            let lo = bytes[0];
+            let mid = bytes[len / 2];
+            let hi = bytes[len - 1];
+            s0 ^= lo as u64;
+            s1 ^= ((hi as u64) << 8) | mid as u64;
+        }
+    } else {
+        // Handle bulk (can partially overlap with suffix).
+        let mut off = 0;
+        while off < len - 16 {
+            let x = u64::from_le_bytes(bytes[off..off + 8].try_into().unwrap());
+            let y = u64::from_le_bytes(bytes[off + 8..off + 16].try_into().unwrap());
+            let t = multiply_mix(s0 ^ x, 0xa4093822299f31d0 ^ y);
+            s0 = s1;
+            s1 = t;
+            off += 16;
+        }
+        let suffix = &bytes[len - 16..];
+        s0 ^= u64::from_le_bytes(suffix[0..8].try_into().unwrap());
+        s1 ^= u64::from_le_bytes(suffix[8..16].try_into().unwrap());
+    }
+    multiply_mix(s0, s1) ^ (len as u64)
+}
+
+const LINE_MASK: u64 = 0x0000000000FFFFFF;
+const HASH_MASK: u64 = !LINE_MASK;
 /// Similar to a [`tokio_util::sync::CancellationToken`],
 /// the RunToken encapsulates the possibility of canceling an async command.
 /// However it also allows pausing and resuming the async command,
@@ -200,13 +243,11 @@ impl RunToken {
                 state: State::Run,
                 cancel_wakers: Default::default(),
                 run_wakers: Default::default(),
-                #[cfg(not(feature = "magic-location"))]
-                location: None,
             }),
             #[cfg(feature = "runtoken-id")]
             id: IDC.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
-            #[cfg(feature = "magic-location")]
-            location: AtomicU64::new(0),
+            location_file: AtomicPtr::new(std::ptr::null_mut()),
+            location_line: AtomicU64::new(0),
         }))
     }
 
@@ -312,44 +353,53 @@ impl RunToken {
     /// Store a file line location in the run_token
     #[inline]
     pub fn set_location(&self, file: &'static str, line: u32) {
-        #[cfg(feature = "magic-location")]
-        {
-            let p = (file.as_ptr() as u64) ^ (SOME_STR.as_ptr() as u64);
-            assert!(p < 0xFFFFFFFFFF);
-            assert!(file.len() < 0xFF);
-            assert!(line < 0xFFFF);
-            let v = p | ((file.len() as u64) << 56) + ((line as u64) << 40);
-            self.0
-                .location
-                .store(v, std::sync::atomic::Ordering::Relaxed);
-        }
-
-        #[cfg(not(feature = "magic-location"))]
-        {
-            self.0.content.lock().unwrap().location = Some((file, line));
-        }
+        let rs_loc = file.find(".rs").expect(".rs in file name");
+        let file = &file[..rs_loc + 3];
+        assert!((line as u64) < LINE_MASK);
+        let hash = fxhash(file.as_bytes());
+        self.0
+            .location_file
+            .store(file.as_ptr() as *mut u8, Ordering::Relaxed);
+        self.0
+            .location_line
+            .store((hash & HASH_MASK) | line as u64, Ordering::Relaxed);
     }
 
-    // Retrive the stored file,live location in the run_token
+    // Retrieve the stored file,live location in the run_token
     pub fn location(&self) -> Option<(&'static str, u32)> {
-        #[cfg(feature = "magic-location")]
-        {
-            let v = self.0.location.load(std::sync::atomic::Ordering::Relaxed);
-            if v == 0 {
+        let mut cnt = 0;
+        loop {
+            let file = self.0.location_file.load(Ordering::Relaxed) as *const u8;
+            let line = self.0.location_line.load(Ordering::Relaxed);
+            if file.is_null() {
                 return None;
             }
-            let len = ((v & 0xFF00000000000000) >> 56) as usize;
-            let line = ((v & 0x00FFFF0000000000) >> 40) as u32;
-            let p = (v & 0x000000FFFFFFFFFF) ^ (SOME_STR.as_ptr() as u64);
-            let s = unsafe {
-                let p = p as *const u8;
-                std::str::from_utf8_unchecked(std::slice::from_raw_parts(p, len))
+            let mut len = 0;
+            let file = loop {
+                // SAFETY: File points to a utf-8 string ending with ".rs"
+                unsafe {
+                    if *file.add(len) == b'.'
+                        && *file.add(len + 1) == b'r'
+                        && *file.add(len + 2) == b's'
+                    {
+                        break std::str::from_utf8_unchecked(std::slice::from_raw_parts(
+                            file,
+                            len + 3,
+                        ));
+                    }
+                }
+                len += 1;
             };
-            Some((s, line))
-        }
-        #[cfg(not(feature = "magic-location"))]
-        {
-            self.0.content.lock().unwrap().location
+
+            let hash = fxhash(file.as_bytes());
+            if (hash & HASH_MASK) == (line & HASH_MASK) {
+                return Some((file, (line & LINE_MASK) as u32));
+            }
+            if cnt == 0xFFFF {
+                return Some((file, 0));
+            }
+            cnt += 1;
+            std::hint::spin_loop();
         }
     }
 
