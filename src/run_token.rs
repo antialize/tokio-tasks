@@ -7,7 +7,9 @@ use std::{
     task::{Context, Poll, Waker},
 };
 
-use std::sync::atomic::{AtomicPtr, AtomicU64};
+use std::sync::atomic::AtomicPtr;
+#[cfg(feature = "runtoken-id")]
+use std::sync::atomic::AtomicU64;
 
 #[cfg(feature = "ordered-locks")]
 use ordered_locks::{L0, LockToken};
@@ -132,8 +134,10 @@ impl Content {
 
     #[cfg(feature = "pause")]
     unsafe fn add_run_waker(&mut self, node: *mut ListNode<Waker>, waker: &Waker) {
-        if !self.run_wakers.in_list(node) {
-            self.run_wakers.push_back(node, waker.clone())
+        unsafe {
+            if !self.run_wakers.in_list(node) {
+                self.run_wakers.push_back(node, waker.clone())
+            }
         }
     }
 
@@ -147,8 +151,10 @@ impl Content {
 
     #[cfg(feature = "pause")]
     unsafe fn remove_run_waker(&mut self, node: *mut ListNode<Waker>) {
-        if self.run_wakers.in_list(node) {
-            self.run_wakers.remove(node);
+        unsafe {
+            if self.run_wakers.in_list(node) {
+                self.run_wakers.remove(node);
+            }
         }
     }
 }
@@ -158,59 +164,8 @@ struct Inner {
     content: std::sync::Mutex<Content>,
     #[cfg(feature = "runtoken-id")]
     id: u64,
-    location_file: AtomicPtr<u8>,
-    location_line: AtomicU64,
+    location_file_line: AtomicPtr<u8>,
 }
-
-// This hash function is coped from
-// https://docs.rs/rustc-hash/2.1.1/src/rustc_hash/lib.rs.html#121
-#[inline]
-fn multiply_mix(x: u64, y: u64) -> u64 {
-    let full = (x as u128) * (y as u128);
-    let lo = full as u64;
-    let hi = (full >> 64) as u64;
-    lo ^ hi
-}
-
-fn fxhash(bytes: &[u8]) -> u64 {
-    let len = bytes.len();
-    let mut s0 = 0x243f6a8885a308d3;
-    let mut s1 = 0x13198a2e03707344;
-    if len <= 16 {
-        // XOR the input into s0, s1.
-        if len >= 8 {
-            s0 ^= u64::from_le_bytes(bytes[0..8].try_into().unwrap());
-            s1 ^= u64::from_le_bytes(bytes[len - 8..].try_into().unwrap());
-        } else if len >= 4 {
-            s0 ^= u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as u64;
-            s1 ^= u32::from_le_bytes(bytes[len - 4..].try_into().unwrap()) as u64;
-        } else if len > 0 {
-            let lo = bytes[0];
-            let mid = bytes[len / 2];
-            let hi = bytes[len - 1];
-            s0 ^= lo as u64;
-            s1 ^= ((hi as u64) << 8) | mid as u64;
-        }
-    } else {
-        // Handle bulk (can partially overlap with suffix).
-        let mut off = 0;
-        while off < len - 16 {
-            let x = u64::from_le_bytes(bytes[off..off + 8].try_into().unwrap());
-            let y = u64::from_le_bytes(bytes[off + 8..off + 16].try_into().unwrap());
-            let t = multiply_mix(s0 ^ x, 0xa4093822299f31d0 ^ y);
-            s0 = s1;
-            s1 = t;
-            off += 16;
-        }
-        let suffix = &bytes[len - 16..];
-        s0 ^= u64::from_le_bytes(suffix[0..8].try_into().unwrap());
-        s1 ^= u64::from_le_bytes(suffix[8..16].try_into().unwrap());
-    }
-    multiply_mix(s0, s1) ^ (len as u64)
-}
-
-const LINE_MASK: u64 = 0x0000000000FFFFFF;
-const HASH_MASK: u64 = !LINE_MASK;
 /// Similar to a [`tokio_util::sync::CancellationToken`],
 /// the RunToken encapsulates the possibility of canceling an async command.
 /// However it also allows pausing and resuming the async command,
@@ -228,8 +183,8 @@ impl RunToken {
                 state: State::Pause,
                 cancel_wakers: Default::default(),
                 run_wakers: Default::default(),
-                location: None,
             }),
+            location_file_line: Default::default(),
             #[cfg(feature = "runtoken-id")]
             id: IDC.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
         }))
@@ -244,10 +199,9 @@ impl RunToken {
                 cancel_wakers: Default::default(),
                 run_wakers: Default::default(),
             }),
+            location_file_line: Default::default(),
             #[cfg(feature = "runtoken-id")]
             id: IDC.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
-            location_file: AtomicPtr::new(std::ptr::null_mut()),
-            location_line: AtomicU64::new(0),
         }))
     }
 
@@ -351,56 +305,37 @@ impl RunToken {
     }
 
     /// Store a file line location in the run_token
+    /// The string must be on the form "file:line\0"
+    ///
+    /// You probably want to call the [set_location] macro instead
     #[inline]
-    pub fn set_location(&self, file: &'static str, line: u32) {
-        let rs_loc = file.find(".rs").expect(".rs in file name");
-        let file = &file[..rs_loc + 3];
-        assert!((line as u64) < LINE_MASK);
-        let hash = fxhash(file.as_bytes());
+    pub fn set_location_file_line(&self, file_line_str: &'static str) {
+        assert!(file_line_str.ends_with('\0'));
         self.0
-            .location_file
-            .store(file.as_ptr() as *mut u8, Ordering::Relaxed);
-        self.0
-            .location_line
-            .store((hash & HASH_MASK) | line as u64, Ordering::Relaxed);
+            .location_file_line
+            .store(file_line_str.as_ptr() as *mut u8, Ordering::Relaxed);
     }
 
-    // Retrieve the stored file,live location in the run_token
+    /// Retrieve the stored file,live location in the run_token
     pub fn location(&self) -> Option<(&'static str, u32)> {
-        let mut cnt = 0;
-        loop {
-            let file = self.0.location_file.load(Ordering::Relaxed) as *const u8;
-            let line = self.0.location_line.load(Ordering::Relaxed);
-            if file.is_null() {
-                return None;
-            }
-            let mut len = 0;
-            let file = loop {
-                // SAFETY: File points to a utf-8 string ending with ".rs"
-                unsafe {
-                    if *file.add(len) == b'.'
-                        && *file.add(len + 1) == b'r'
-                        && *file.add(len + 2) == b's'
-                    {
-                        break std::str::from_utf8_unchecked(std::slice::from_raw_parts(
-                            file,
-                            len + 3,
-                        ));
-                    }
-                }
-                len += 1;
-            };
-
-            let hash = fxhash(file.as_bytes());
-            if (hash & HASH_MASK) == (line & HASH_MASK) {
-                return Some((file, (line & LINE_MASK) as u32));
-            }
-            if cnt == 0xFFFF {
-                return Some((file, 0));
-            }
-            cnt += 1;
-            std::hint::spin_loop();
+        let location_file_line = self.0.location_file_line.load(Ordering::Relaxed) as *const u8;
+        if location_file_line.is_null() {
+            return None;
         }
+        let mut len = 0;
+        // SAFETY: File points to a utf-8 string ending with "\0"
+        // This is checked by _set_location
+        let location_file_line = unsafe {
+            while *location_file_line.add(len) != b'0' {
+                len += 1;
+            }
+            std::str::from_utf8_unchecked(std::slice::from_raw_parts(location_file_line, len))
+        };
+        let (file, line) = location_file_line
+            .rsplit_once(":")
+            .expect(": in location_file_line");
+        let line = line.parse().expect("Line number after :");
+        Some((file, line))
     }
 
     #[cfg(feature = "runtoken-id")]
@@ -408,6 +343,14 @@ impl RunToken {
     pub fn id(&self) -> u64 {
         self.0.id
     }
+}
+
+/// Update the location stored in a run token to the current file:line
+#[macro_export]
+macro_rules! set_location {
+    ($run_token: expr) => {
+        $run_token.set_location_file_line(concat!(file!(), ":", line!(), "\0"));
+    };
 }
 
 impl Default for RunToken {
