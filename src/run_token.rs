@@ -1,4 +1,3 @@
-
 //! Defines a run token that can be used to cancel async tasks
 use futures_util::Future;
 
@@ -46,19 +45,24 @@ impl<T> IntrusiveList<T> {
     ///
     /// This will write a value to the node
     unsafe fn push_back(&mut self, node: *mut ListNode<T>, v: T) {
-        unsafe {
-            assert!((*node).next.is_null());
-            (*node).data.write(v);
-            if self.first.is_null() {
-                (*node).next = node;
-                (*node).prev = node;
-                self.first = node;
-            } else {
-                (*node).prev = (*self.first).prev;
-                (*node).next = self.first;
-                (*(*node).prev).next = node;
-                (*(*node).next).prev = node;
+        // Safety: node is a valid pointer we may access
+        let n = unsafe { &mut *node };
+        assert!(n.next.is_null());
+        n.data.write(v);
+        if self.first.is_null() {
+            n.next = n;
+            n.prev = n;
+            self.first = n;
+        } else {
+            // Safety: first is not null and can be deref'ed by the invariants of the list
+            let f = unsafe { &mut *self.first };
+            n.prev = f.prev;
+            n.next = self.first;
+            // Safety: we have just set prev to a valid pointer
+            unsafe {
+                (*n.prev).next = node;
             }
+            f.prev = node;
         }
     }
 
@@ -71,43 +75,54 @@ impl<T> IntrusiveList<T> {
     ///
     /// The value will be read out from the node
     unsafe fn remove(&mut self, node: *mut ListNode<T>) -> T {
-        unsafe {
-            assert!(!(*node).next.is_null());
-            let v = (*node).data.as_mut_ptr().read();
-            if (*node).next == node {
-                self.first = std::ptr::null_mut();
-            } else {
-                if self.first == node {
-                    self.first = (*node).next;
-                }
-                (*(*node).next).prev = (*node).prev;
-                (*(*node).prev).next = (*node).next;
+        // Safety: node is a valid pointer we may access
+        let n = unsafe { &mut *node };
+        assert!(!n.next.is_null());
+        // Safety: We require that the node is in the list,
+        // which by invariant means that data is set
+        let v = unsafe { n.data.as_mut_ptr().read() };
+        if n.next == node {
+            self.first = std::ptr::null_mut();
+        } else {
+            if self.first == node {
+                self.first = n.next;
             }
-            (*node).next = std::ptr::null_mut();
-            (*node).prev = std::ptr::null_mut();
-            v
+            // Safety: By list invariants n.next is a valid pointer we may mutate
+            unsafe {
+                (*n.next).prev = n.prev;
+            }
+            // Safety: By list invariants n.prev is a valid pointer we may mutate
+            unsafe {
+                (*n.prev).next = n.next;
+            }
         }
+        n.next = std::ptr::null_mut();
+        n.prev = std::ptr::null_mut();
+        v
     }
 
     /// Remove all entries from this list
     fn drain(&mut self, v: impl Fn(T)) {
-        unsafe {
-            if self.first.is_null() {
-                return;
-            }
-            let mut cur = self.first;
-            loop {
-                v((*cur).data.as_mut_ptr().read());
-                let next = (*cur).next;
-                (*cur).next = std::ptr::null_mut();
-                (*cur).prev = std::ptr::null_mut();
-                if next == self.first {
-                    break;
-                }
-                cur = next;
-            }
-            self.first = std::ptr::null_mut();
+        if self.first.is_null() {
+            return;
         }
+        let mut cur = self.first;
+        loop {
+            // Safety: By invariant cur points to a list node that has not
+            // yet been removed, and we are allowed to mutate it
+            let c = unsafe { &mut *cur };
+            // Safety: Since c is in the list it has a data value
+            let d = unsafe { c.data.as_mut_ptr().read() };
+            v(d);
+            let next = c.next;
+            c.next = std::ptr::null_mut();
+            c.prev = std::ptr::null_mut();
+            if next == self.first {
+                break;
+            }
+            cur = next;
+        }
+        self.first = std::ptr::null_mut();
     }
 
     /// Check if the node is in a list
@@ -116,6 +131,7 @@ impl<T> IntrusiveList<T> {
     /// - node should be a valid pointer
     /// - No one should modify node while we access it
     unsafe fn in_list(&self, node: *mut ListNode<T>) -> bool {
+        // Safety: Node is a valid pointer
         unsafe { !(*node).next.is_null() }
     }
 }
@@ -164,6 +180,7 @@ struct Content {
     run_wakers: IntrusiveList<Waker>,
 }
 
+// Safety: the intrusive lists may be sent between threads
 unsafe impl Send for Content {}
 
 impl Content {
@@ -173,10 +190,14 @@ impl Content {
     /// - node must be a valid pointer
     /// - node must not contain a value if it is not in a list
     unsafe fn add_cancel_waker(&mut self, node: *mut ListNode<Waker>, waker: &Waker) {
-        unsafe {
-            if !self.cancel_wakers.in_list(node) {
-                self.cancel_wakers.push_back(node, waker.clone())
-            }
+        // Safety: We can check if the node is in the list since it is a valid pointer
+        // and we own mutation rights
+        let in_list = unsafe { self.cancel_wakers.in_list(node) };
+        if !in_list {
+            // Safety: Node is a valid pointer, we may mutate it,
+            // we have checked that it is not part of a list, and thus
+            // it has no value
+            unsafe { self.cancel_wakers.push_back(node, waker.clone()) }
         }
     }
 
@@ -187,10 +208,14 @@ impl Content {
     /// - node must not contain a value if it is not in a list
     #[cfg(feature = "pause")]
     unsafe fn add_run_waker(&mut self, node: *mut ListNode<Waker>, waker: &Waker) {
-        unsafe {
-            if !self.run_wakers.in_list(node) {
-                self.run_wakers.push_back(node, waker.clone())
-            }
+        // Safety: We can check if the node is in the list since it is a valid pointer
+        // and we own mutation rights
+        let in_list = unsafe { self.run_wakers.in_list(node) };
+        if !in_list {
+            // Safety: Node is a valid pointer, we may mutate it,
+            // we have checked that it is not part of a list, and thus
+            // it has no value
+            unsafe { self.run_wakers.push_back(node, waker.clone()) }
         }
     }
 
@@ -201,10 +226,12 @@ impl Content {
     /// - node must be a valid pointer
     /// - if the node is in a list, it mut be the cancel_wakers list
     unsafe fn remove_cancel_waker(&mut self, node: *mut ListNode<Waker>) {
-        unsafe {
-            if self.cancel_wakers.in_list(node) {
-                self.cancel_wakers.remove(node);
-            }
+        // Safety: We can check if the node is in the list since it is a valid pointer
+        // and we own mutation rights
+        let in_list = unsafe { self.cancel_wakers.in_list(node) };
+        if in_list {
+            // Safety: Node is a valid pointer, we may mutate it and it is in the list
+            unsafe { self.cancel_wakers.remove(node) };
         }
     }
 
@@ -216,10 +243,12 @@ impl Content {
     /// - if the node is in a list, it mut be the run_wakers list
     #[cfg(feature = "pause")]
     unsafe fn remove_run_waker(&mut self, node: *mut ListNode<Waker>) {
-        unsafe {
-            if self.run_wakers.in_list(node) {
-                self.run_wakers.remove(node);
-            }
+        // Safety: We can check if the node is in the list since it is a valid pointer
+        // and we own mutation rights
+        let in_list = unsafe { self.run_wakers.in_list(node) };
+        if in_list {
+            // Safety: Node is a valid pointer, we may mutate it and it is in the list
+            unsafe { self.run_wakers.remove(node) };
         }
     }
 }
@@ -392,14 +421,27 @@ impl RunToken {
             return None;
         }
         let mut len = 0;
-        // SAFETY: File points to a utf-8 string ending with "\0"
-        // This is checked by _set_location
-        let location_file_line = unsafe {
-            while *location_file_line.add(len) != b'0' {
-                len += 1;
+        // Safety: let must be within the string since it is \0 terminated and we
+        // have not yet seen a \0
+        loop {
+            // Safety: let must be within the string since it is \0 terminated and we
+            // have not yet seen a \0
+            let l = unsafe { location_file_line.add(len) };
+            // Safety: let must be within the string since it is \0 terminated and we
+            // have not yet seen a \0
+            let c = unsafe { *l };
+            if c == b'0' {
+                break;
             }
-            std::str::from_utf8_unchecked(std::slice::from_raw_parts(location_file_line, len))
-        };
+            len += 1;
+        }
+
+        // Safety: location_file_line points to a byte array with at least len bytes
+        let location_file_line = unsafe { std::slice::from_raw_parts(location_file_line, len) };
+
+        // Safety: location_file_line points to a utf-8 string ending with "\0"
+        let location_file_line = unsafe {std::str::from_utf8_unchecked(location_file_line)};
+
         let (file, line) = location_file_line
             .rsplit_once(":")
             .expect(": in location_file_line");
@@ -468,16 +510,20 @@ impl<'a> Future for WaitForCancellationFuture<'a> {
         match content.state {
             State::Cancel => Poll::Ready(()),
             State::Run => {
-                unsafe {
-                    content.add_cancel_waker(&mut Pin::get_unchecked_mut(self).waker, cx.waker());
-                }
+                // Safety: We do not move the node
+                let node = unsafe { &mut Pin::get_unchecked_mut(self).waker };
+                // Safety: The node is either not in the list and has no value, or it is
+                // in the list and has a value
+                unsafe { content.add_cancel_waker(node, cx.waker()) };
                 Poll::Pending
             }
             #[cfg(feature = "pause")]
             State::Pause => {
-                unsafe {
-                    content.add_cancel_waker(&mut Pin::get_unchecked_mut(self).waker, cx.waker());
-                }
+                // Safety: We do not move the node
+                let node = unsafe { &mut Pin::get_unchecked_mut(self).waker };
+                // Safety: The node is either not in the list and has no value, or it is
+                // in the list and has a value
+                unsafe { content.add_cancel_waker(node, cx.waker()) };
                 Poll::Pending
             }
         }
@@ -486,6 +532,7 @@ impl<'a> Future for WaitForCancellationFuture<'a> {
 
 impl<'a> Drop for WaitForCancellationFuture<'a> {
     fn drop(&mut self) {
+        // Safety: The node is valid
         unsafe {
             self.token
                 .0
@@ -497,13 +544,14 @@ impl<'a> Drop for WaitForCancellationFuture<'a> {
     }
 }
 
+// Safety: We can safely move WaitForCancellationFuture when it is not pinned
 unsafe impl<'a> Send for WaitForCancellationFuture<'a> {}
 
+#[cfg(feature = "pause")]
 /// Wait until task is not paused
 ///
 /// Note: [std::mem::forget]ting this future may crash your application,
 /// a pointer to the content of this future is stored in the RunToken
-#[cfg(feature = "pause")]
 #[must_use = "futures do nothing unless polled"]
 pub struct WaitForPauseFuture<'a> {
     /// The run toke to wait to unpause
@@ -529,9 +577,10 @@ impl<'a> Future for WaitForPauseFuture<'a> {
             State::Cancel => Poll::Ready(true),
             State::Run => Poll::Ready(false),
             State::Pause => {
-                unsafe {
-                    content.add_run_waker(&mut Pin::get_unchecked_mut(self).waker, cx.waker());
-                }
+                // Safety: We will not move the node
+                let node = unsafe { &mut Pin::get_unchecked_mut(self).waker };
+                // Safety: The node is a valid pointer
+                unsafe { content.add_run_waker(node, cx.waker()) };
                 Poll::Pending
             }
         }
@@ -541,6 +590,7 @@ impl<'a> Future for WaitForPauseFuture<'a> {
 #[cfg(feature = "pause")]
 impl<'a> Drop for WaitForPauseFuture<'a> {
     fn drop(&mut self) {
+        // Safety: The node is valid
         unsafe {
             self.token
                 .0
@@ -553,4 +603,5 @@ impl<'a> Drop for WaitForPauseFuture<'a> {
 }
 
 #[cfg(feature = "pause")]
+// Safety: We can safely move WaitForPauseFuture when it is not pinned
 unsafe impl<'a> Send for WaitForPauseFuture<'a> {}

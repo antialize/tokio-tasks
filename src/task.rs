@@ -231,6 +231,7 @@ impl TaskBuilder {
         self,
         fun: F,
     ) -> Arc<Task<T, E>> {
+        // Safety: We do not hold any lock in the task context
         self.create(|run_token| fun(run_token, unsafe { CleanLockToken::new() }))
     }
 }
