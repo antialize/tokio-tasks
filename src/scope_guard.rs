@@ -1,4 +1,8 @@
+//! Define [ScopeGuard] that will call a function on destruction
+
+/// Execute the contained function at end of scope unless `release` has been called
 pub struct ScopeGuard<F: FnMut()> {
+    /// Functor to call when dropped
     f: F,
 }
 

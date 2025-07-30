@@ -1,3 +1,4 @@
+//! Implement task management for tokio
 use crate::{RunToken, scope_guard::scope_guard};
 use futures_util::{
     Future, FutureExt,
@@ -23,9 +24,13 @@ use tokio::{
 #[cfg(feature = "ordered-locks")]
 use ordered_locks::{CleanLockToken, L0, LockToken};
 
+/// [HashMap] of all running tasks
 static TASKS: Mutex<Option<HashMap<usize, Arc<dyn TaskBase>>>> = Mutex::new(None);
+/// Notify this when we should shut down
 static SHUTDOWN_NOTIFY: Notify = Notify::const_new();
+/// Incremental counter for task ids
 static TASK_ID_COUNT: AtomicUsize = AtomicUsize::new(0);
+/// Atomic boolean indicating if we are currently shutting down
 static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 
 /// Error returned by [cancelable] when c was canceled before the future returned
@@ -83,18 +88,26 @@ pub enum FinishState<'a> {
 
 /// Builder to create a new task
 pub struct TaskBuilder {
+    /// Id of the task to build
     id: usize,
+    /// Name of the task to build
     name: Cow<'static, str>,
+    /// Run token of to use for the task
     run_token: RunToken,
+    /// Stop the application stop if the task fails
     critical: bool,
+    /// Stop the application stop if the task finishes
     main: bool,
+    /// Stop the task by dropping the future instead of cancelling the [RunToken]
     abort: bool,
+    /// Do to shutdown the task when the application is shutting down
     no_shutdown: bool,
+    /// Shut down the task by this priority
     shutdown_order: i32,
 }
 
 impl TaskBuilder {
-    /// Stract the construction of a new task with the given name
+    /// Start the construction of a new task with the given name
     pub fn new(name: impl Into<Cow<'static, str>>) -> Self {
         Self {
             id: TASK_ID_COUNT.fetch_add(1, Ordering::SeqCst),
@@ -250,15 +263,25 @@ pub trait TaskBase: Send + Sync {
 
 /// A possible running task, with a return value of `Result<T, E>`
 pub struct Task<T: Send + Sync, E: Sync + Sync> {
+    /// The unique id of the task
     id: usize,
+    /// The name of the task
     name: Cow<'static, str>,
+    /// Stop the application if this task fails
     critical: bool,
+    /// Stop the application if this task finishes
     main: bool,
+    /// std::mem::drop the future of the task when shutting down, instead of cancelling the [RunToken]
     abort: bool,
+    /// Do not wait for the task to shut down when shutting down
     no_shutdown: bool,
+    /// Order in which the task should shut down
     shutdown_order: i32,
+    /// Run token associated with the task
     run_token: RunToken,
+    /// Start time of the task as unix time stamp
     start_time: f64,
+    /// Join handle for the task
     join_handle: Mutex<Option<JoinHandle<Result<T, E>>>>,
 }
 
@@ -395,12 +418,16 @@ impl<E: std::fmt::Display + Send + Sync> std::fmt::Display for WaitError<E> {
 
 impl<E: std::error::Error + Send + Sync> std::error::Error for WaitError<E> {}
 
+/// Borrow join_handle from task, put it back when dropped
 struct TaskJoinHandleBorrow<'a, T: Send + Sync, E: Send + Sync> {
+    /// The task we have borrowed the join handle from
     task: &'a Arc<Task<T, E>>,
+    /// The borrowed join handle
     jh: Option<JoinHandle<Result<T, E>>>,
 }
 
 impl<'a, T: Send + Sync, E: Send + Sync> TaskJoinHandleBorrow<'a, T, E> {
+    /// Borrow the join handle from the task until I am dropped
     fn new(task: &'a Arc<Task<T, E>>) -> Self {
         let jh = task.join_handle.lock().unwrap().take();
         Self { task, jh }
@@ -465,6 +492,8 @@ impl<T: Send + Sync, E: Send + Sync> Task<T, E> {
         r
     }
 }
+
+/// Future to wait for all futures in the vec to finish
 struct WaitTasks<'a, Sleep, Fut>(Sleep, &'a mut Vec<(String, usize, Fut, RunToken)>);
 impl<'a, Sleep: Unpin, Fut: Unpin> Unpin for WaitTasks<'a, Sleep, Fut> {}
 impl<'a, Sleep: Future + Unpin, Fut: Future + Unpin> Future for WaitTasks<'a, Sleep, Fut> {

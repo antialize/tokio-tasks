@@ -12,6 +12,10 @@ repository = "https://github.com/antialize/tokio-tasks"
 [lints.rust]
 missing_docs = "deny"
 
+[lints.clippy]
+missing_safety_doc = "deny"
+missing_docs_in_private_items = "deny"
+
 [features]
 pause = []
 runtoken-id = []
