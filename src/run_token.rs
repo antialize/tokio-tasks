@@ -1,3 +1,5 @@
+
+//! Defines a run token that can be used to cancel async tasks
 use futures_util::Future;
 
 use std::{
@@ -17,6 +19,7 @@ use ordered_locks::{L0, LockToken};
 #[cfg(feature = "runtoken-id")]
 static IDC: AtomicU64 = AtomicU64::new(0);
 
+/// Intrusive circular linked list of T's
 pub struct IntrusiveList<T> {
     first: *mut ListNode<T>,
 }
@@ -91,6 +94,7 @@ impl<T> IntrusiveList<T> {
     }
 }
 
+/// Node uned in the linked list
 pub struct ListNode<T> {
     prev: *mut ListNode<T>,
     next: *mut ListNode<T>,
@@ -249,7 +253,7 @@ impl RunToken {
         matches!(self.0.content.lock().unwrap().state, State::Cancel)
     }
 
-    // Return true iff we are paused
+    /// Return true iff we are paused
     #[cfg(feature = "pause")]
     pub fn is_paused(&self) -> bool {
         matches!(self.0.content.lock().unwrap().state, State::Pause)
@@ -276,7 +280,7 @@ impl RunToken {
         }
     }
 
-    // Suspend the async coroutine until we are not paused, and then return true if we are canceled or false if we are running
+    /// Suspend the async coroutine until we are not paused, and then return true if we are canceled or false if we are running
     #[cfg(feature = "pause")]
     pub fn wait_paused_check_cancelled(&self) -> WaitForPauseFuture<'_> {
         WaitForPauseFuture {
@@ -293,6 +297,8 @@ impl RunToken {
         }
     }
 
+    /// Suspend the async coroutine until cancel() is called, checking that we do not hold
+    /// a too deep lock
     #[cfg(feature = "ordered-locks")]
     pub fn cancelled_checked(
         &self,
@@ -338,6 +344,7 @@ impl RunToken {
         Some((file, line))
     }
 
+    /// The unique incremental id of this run token
     #[cfg(feature = "runtoken-id")]
     #[inline]
     pub fn id(&self) -> u64 {

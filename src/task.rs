@@ -38,6 +38,7 @@ impl Display for CancelledError {
 }
 impl std::error::Error for CancelledError {}
 
+/// A pinned, boxed future of T
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// Return result from fut, unless run_token is canceled before fut is done

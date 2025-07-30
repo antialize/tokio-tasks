@@ -9,6 +9,9 @@ keywords = ["taskmanagment"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/antialize/tokio-tasks"
 
+[lints.rust]
+missing_docs = "deny"
+
 [features]
 pause = []
 runtoken-id = []
