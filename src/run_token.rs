@@ -440,13 +440,15 @@ impl RunToken {
         let location_file_line = unsafe { std::slice::from_raw_parts(location_file_line, len) };
 
         // Safety: location_file_line points to a utf-8 string ending with "\0"
-        let location_file_line = unsafe {std::str::from_utf8_unchecked(location_file_line)};
+        let location_file_line = unsafe { std::str::from_utf8_unchecked(location_file_line) };
 
-        let (file, line) = location_file_line
-            .rsplit_once(":")
-            .expect(": in location_file_line");
-        let line = line.parse().expect("Line number after :");
-        Some((file, line))
+        match location_file_line.rsplit_once(":") {
+            Some((file, line)) => match line.parse() {
+                Ok(v) => Some((file, v)),
+                Err(_) => Some((location_file_line, 0)),
+            },
+            None => Some((location_file_line, 0)),
+        }
     }
 
     /// The unique incremental id of this run token
