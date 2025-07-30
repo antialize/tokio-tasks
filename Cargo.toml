@@ -1,11 +1,11 @@
 [package]
 name = "tokio-tasks"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2024"
 authors = ["Jakob Truelsen <jakob@scalgo.com>"]
-description = "Task managment for tokio"
+description = "Task management for tokio"
 documentation = "https://docs.rs/tokio-tasks"
-keywords = ["taskmanagment"]
+keywords = ["taskmanagement"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/antialize/tokio-tasks"
 
