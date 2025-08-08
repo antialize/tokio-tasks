@@ -430,7 +430,7 @@ impl RunToken {
             // Safety: let must be within the string since it is \0 terminated and we
             // have not yet seen a \0
             let c = unsafe { *l };
-            if c == b'0' {
+            if c == b'\0' {
                 break;
             }
             len += 1;
