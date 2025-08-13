@@ -1,6 +1,6 @@
 [package]
 name = "tokio-tasks"
-version = "0.5.2"
+version = "0.5.3"
 edition = "2024"
 authors = ["Jakob Truelsen <jakob@scalgo.com>"]
 description = "Task management for tokio"
@@ -23,6 +23,7 @@ missing_docs_in_private_items = "deny"
 [features]
 pause = []
 runtoken-id = []
+runtoken-user-data = []
 
 [dependencies]
 futures-util = "0.3"

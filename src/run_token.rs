@@ -178,6 +178,9 @@ struct Content {
     cancel_wakers: IntrusiveList<Waker>,
     /// Wakers to wake when unpausing the [RunToken]
     run_wakers: IntrusiveList<Waker>,
+    /// User supplied data stored in runtoken
+    #[cfg(feature = "runtoken-user-data")]
+    user_data: Option<String>,
 }
 
 // Safety: the intrusive lists may be sent between threads
@@ -283,6 +286,8 @@ impl RunToken {
                 state: State::Pause,
                 cancel_wakers: Default::default(),
                 run_wakers: Default::default(),
+                #[cfg(feature = "runtoken-user-data")]
+                user_data: None,
             }),
             location_file_line: Default::default(),
             #[cfg(feature = "runtoken-id")]
@@ -298,6 +303,8 @@ impl RunToken {
                 state: State::Run,
                 cancel_wakers: Default::default(),
                 run_wakers: Default::default(),
+                #[cfg(feature = "runtoken-user-data")]
+                user_data: None,
             }),
             location_file_line: Default::default(),
             #[cfg(feature = "runtoken-id")]
@@ -451,11 +458,23 @@ impl RunToken {
         }
     }
 
-    /// The unique incremental id of this run token
     #[cfg(feature = "runtoken-id")]
+    /// The unique incremental id of this run token
     #[inline]
     pub fn id(&self) -> u64 {
         self.0.id
+    }
+
+    #[cfg(feature = "runtoken-user-data")]
+    /// Store user data in the run token
+    pub fn set_user_data(&self, data: Option<String>) {
+        self.0.content.lock().unwrap().user_data = data;
+    }
+
+    #[cfg(feature = "runtoken-user-data")]
+    /// Get user data stored in run_token
+    pub fn user_data(&self) -> Option<String> {
+        self.0.content.lock().unwrap().user_data.clone()
     }
 }
 
