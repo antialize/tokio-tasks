@@ -9,7 +9,7 @@ use std::{
 };
 
 use std::sync::atomic::AtomicPtr;
-#[cfg(feature = "runtoken-id")]
+#[cfg(any(feature = "runtoken-id", feature = "runtoken-location-time"))]
 use std::sync::atomic::AtomicU64;
 
 #[cfg(feature = "ordered-locks")]
@@ -18,6 +18,29 @@ use ordered_locks::{L0, LockToken};
 /// Next id used for run token ids
 #[cfg(feature = "runtoken-id")]
 static IDC: AtomicU64 = AtomicU64::new(0);
+
+/// Returns nanoseconds since system boot (CLOCK_MONOTONIC) on Unix.
+/// On other platforms, returns nanoseconds since first call.
+#[cfg(feature = "runtoken-location-time")]
+#[inline]
+fn monotonic_ns() -> u64 {
+    #[cfg(unix)]
+    {
+        let mut ts = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // Safety: CLOCK_MONOTONIC is always a valid clock id, and ts is a valid pointer
+        unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+        ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
+    }
+    #[cfg(not(unix))]
+    {
+        static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        let epoch = EPOCH.get_or_init(std::time::Instant::now);
+        std::time::Instant::now().duration_since(*epoch).as_nanos() as u64
+    }
+}
 
 /// Intrusive circular linked list of T's
 pub struct IntrusiveList<T> {
@@ -268,6 +291,11 @@ struct Inner {
     /// The location last set on this run-token, mut be a valid pointer to a
     /// &' static str of the form "file:line" or null
     location_file_line: AtomicPtr<u8>,
+    /// The time at which [RunToken::set_location_file_line] was last called,
+    /// as nanoseconds since system boot (CLOCK_MONOTONIC) on Unix, or
+    /// nanoseconds since first call on other platforms
+    #[cfg(feature = "runtoken-location-time")]
+    location_time: AtomicU64,
 }
 /// Similar to a [`tokio_util::sync::CancellationToken`],
 /// the RunToken encapsulates the possibility of canceling an async command.
@@ -290,6 +318,8 @@ impl RunToken {
                 user_data: None,
             }),
             location_file_line: Default::default(),
+            #[cfg(feature = "runtoken-location-time")]
+            location_time: AtomicU64::new(0),
             #[cfg(feature = "runtoken-id")]
             id: IDC.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
         }))
@@ -307,6 +337,8 @@ impl RunToken {
                 user_data: None,
             }),
             location_file_line: Default::default(),
+            #[cfg(feature = "runtoken-location-time")]
+            location_time: AtomicU64::new(0),
             #[cfg(feature = "runtoken-id")]
             id: IDC.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
         }))
@@ -419,6 +451,10 @@ impl RunToken {
         self.0
             .location_file_line
             .store(file_line_str.as_ptr() as *mut u8, Ordering::Relaxed);
+        #[cfg(feature = "runtoken-location-time")]
+        self.0
+            .location_time
+            .store(monotonic_ns(), Ordering::Release);
     }
 
     /// Retrieve the stored file,live location in the run_token
@@ -456,6 +492,57 @@ impl RunToken {
             },
             None => Some((location_file_line, 0)),
         }
+    }
+
+    #[cfg(feature = "runtoken-location-time")]
+    /// The time at which [RunToken::set_location_file_line] was last called,
+    /// as nanoseconds since system boot (CLOCK_MONOTONIC). Suitable for
+    /// ordering events across threads.
+    /// Returns 0 if [RunToken::set_location_file_line] has never been called.
+    ///
+    /// # Torn reads
+    ///
+    /// The location and time are stored as two separate relaxed atomic writes,
+    /// so a concurrent reader may observe a time that belongs to a *different*
+    /// call than the location returned by [RunToken::location] - the time may
+    /// be either older or newer than the location.
+    #[inline]
+    pub fn location_time(&self) -> u64 {
+        self.0.location_time.load(Ordering::Acquire)
+    }
+
+    #[cfg(feature = "runtoken-location-time")]
+    /// Returns a hopefully consistent `(time, (file, line))` pair using a seqlock-style
+    /// read.
+    ///
+    /// Returns `None` if [RunToken::set_location_file_line] has never been called.
+    pub fn location_and_time(&self) -> Option<(u64, (&'static str, u32))> {
+        // the location is read between two `Acquire` loads of `location_time`,
+        // and the pair is accepted only if both reads agree (meaning no write
+        // occurred in between). The writer uses a `Release` store on `location_time`,
+        // so this is correct on all architectures. On x86_64 `Acquire`/`Release`
+        // compile to plain `MOV` instructions, identical to `Relaxed`.
+        //
+        // Up to 20 attempts are made before returning a best-effort pair.
+        for _ in 0..20 {
+            let t1 = self.0.location_time.load(Ordering::Acquire);
+            if t1 == 0 {
+                return None;
+            }
+            let Some(loc) = self.location() else {
+                return None;
+            };
+            let t2 = self.0.location_time.load(Ordering::Acquire);
+            if t1 == t2 {
+                return Some((t1, loc));
+            }
+        }
+        // Best-effort fallback after repeated contention
+        let t = self.0.location_time.load(Ordering::Acquire);
+        if t == 0 {
+            return None;
+        }
+        self.location().map(|l| (t, l))
     }
 
     #[cfg(feature = "runtoken-id")]
