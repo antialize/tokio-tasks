@@ -1,6 +1,6 @@
 [package]
 name = "tokio-tasks"
-version = "0.5.3"
+version = "0.5.4"
 edition = "2024"
 authors = ["Jakob Truelsen <jakob@scalgo.com>"]
 description = "Task management for tokio"
@@ -24,9 +24,13 @@ missing_docs_in_private_items = "deny"
 pause = []
 runtoken-id = []
 runtoken-user-data = []
+runtoken-location-time = ["dep:libc"]
 
 [dependencies]
 futures-util = "0.3"
 tokio = { version = "1", default-features=false, features = ["sync", "time", "rt"] }
 ordered-locks = { version = "0.2", optional=true }
 log = "0.4"
+
+[target.'cfg(unix)'.dependencies]
+libc = { version = "0.2", optional = true }
